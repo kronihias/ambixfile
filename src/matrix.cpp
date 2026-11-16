@@ -136,6 +136,31 @@ inline double fumaGain(std::uint32_t fumaIndex) noexcept {
     }
 }
 
+// Furse-Malham channel indices of the reduced sets used by .amb files.
+// Returns the number of channels in the set, or 0 if there is none of that size.
+inline std::uint32_t fumaChannelSet(std::uint32_t channels, const std::uint32_t*& set, std::uint32_t& order) noexcept {
+    static const std::uint32_t all[16] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+    static const std::uint32_t h1[3] = {0, 1, 2};                            // WXY
+    static const std::uint32_t h2[5] = {0, 1, 2, 7, 8};                      // WXYUV
+    static const std::uint32_t h2v1[6] = {0, 1, 2, 3, 7, 8};                 // WXYZUV
+    static const std::uint32_t h3[7] = {0, 1, 2, 7, 8, 14, 15};              // WXYUVPQ
+    static const std::uint32_t h3v1[8] = {0, 1, 2, 3, 7, 8, 14, 15};         // WXYZUVPQ
+    static const std::uint32_t h3v2[11] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 14, 15}; // WXYZRSTUVPQ
+    switch (channels) {
+    case 1: set = all; order = 0; return 1;
+    case 3: set = h1; order = 1; return 3;
+    case 4: set = all; order = 1; return 4;
+    case 5: set = h2; order = 2; return 5;
+    case 6: set = h2v1; order = 2; return 6;
+    case 7: set = h3; order = 3; return 7;
+    case 8: set = h3v1; order = 3; return 8;
+    case 9: set = all; order = 2; return 9;
+    case 11: set = h3v2; order = 3; return 11;
+    case 16: set = all; order = 3; return 16;
+    default: return 0;
+    }
+}
+
 } // namespace detail
 
 bool Matrix::pseudoInverse(Matrix& out) const {
@@ -228,6 +253,33 @@ Matrix ambixToFuma(std::uint32_t order) {
         const std::uint32_t fuma = detail::kAcnToFumaIndex[acn];
         m(fuma, acn) = static_cast<float>(detail::fumaGain(fuma));
     }
+    return m;
+}
+
+Matrix fumaChannelsToAmbix(std::uint32_t fumaChannels) {
+    const std::uint32_t* set = nullptr;
+    std::uint32_t order = 0;
+    const std::uint32_t count = detail::fumaChannelSet(fumaChannels, set, order);
+    if (!count) return Matrix();
+    const std::uint32_t full = orderToChannels(order);
+    Matrix m(full, count);
+    for (std::uint32_t acn = 0; acn < full; ++acn)
+        for (std::uint32_t col = 0; col < count; ++col)
+            if (set[col] == detail::kAcnToFumaIndex[acn])
+                m(acn, col) = static_cast<float>(1.0 / detail::fumaGain(set[col]));
+    return m;
+}
+
+Matrix ambixToFumaChannels(std::uint32_t fumaChannels) {
+    const std::uint32_t* set = nullptr;
+    std::uint32_t order = 0;
+    const std::uint32_t count = detail::fumaChannelSet(fumaChannels, set, order);
+    if (!count) return Matrix();
+    const std::uint32_t full = orderToChannels(order);
+    Matrix m(count, full);
+    for (std::uint32_t acn = 0; acn < full; ++acn)
+        for (std::uint32_t row = 0; row < count; ++row)
+            if (set[row] == detail::kAcnToFumaIndex[acn]) m(row, acn) = static_cast<float>(detail::fumaGain(set[row]));
     return m;
 }
 

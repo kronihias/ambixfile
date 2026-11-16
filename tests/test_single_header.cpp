@@ -24,5 +24,17 @@ int main() {
     CHECK(reader.read(back, 1) == 1);
     CHECK(back[0] == 0.1f && back[3] == 0.4f);
     CHECK(secondTranslationUnitWorks());
+#ifdef AMBIXFILE_ENABLE_WAVPACK
+    CHECK(wavpackAvailable());
+    MemoryStream packed;
+    config.container = Container::WavPack;
+    CHECK(writer.open(packed, config) == Status::Ok);
+    CHECK(writer.write(frame, 1) == 1);
+    CHECK(writer.close() == Status::Ok);
+    CHECK(reader.open(packed) == Status::Ok);
+    CHECK(reader.info().container == Container::WavPack && reader.info().frames == 1);
+#else
+    CHECK(!wavpackAvailable());
+#endif
     return finish("test_single_header");
 }

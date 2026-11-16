@@ -4,70 +4,88 @@
 #include "internal.hpp"
 
 namespace ambixfile {
-namespace detail {
-
-inline void appendBytes(std::vector<std::uint8_t>& out, const void* data, std::size_t size) {
-    const std::uint8_t* p = static_cast<const std::uint8_t*>(data);
-    out.insert(out.end(), p, p + size);
-}
-inline void appendBE32(std::vector<std::uint8_t>& out, std::uint32_t v) {
-    std::uint8_t b[4];
-    storeBE32(b, v);
-    appendBytes(out, b, 4);
-}
-inline void appendBE64(std::vector<std::uint8_t>& out, std::uint64_t v) {
-    std::uint8_t b[8];
-    storeBE64(b, v);
-    appendBytes(out, b, 8);
-}
-inline void appendChunkHeader(std::vector<std::uint8_t>& out, std::uint32_t type, std::int64_t size) {
-    appendBE32(out, type);
-    appendBE64(out, static_cast<std::uint64_t>(size));
-}
-
-} // namespace detail
 
 struct Writer::Impl {
     std::unique_ptr<Stream> owned;
     Stream* stream = nullptr;
     Info info;
-    std::vector<Chunk> trailing;
+    Matrix adaptor;
+    // Metadata not yet written: bound for the header until the first write,
+    // for the end of the file afterwards.
+    std::vector<Chunk> chunks;
+    std::vector<Marker> markers;
+    std::vector<Region> regions;
+    std::uint32_t nextId = 1;
+    bool started = false;
+    bool failed = false;
+    float hybridBits = 0.0f;
+    int threads = 0;
     std::int64_t dataSizeOffset = 0; // position of the data chunk's size field
     std::int64_t dataStart = 0;
     std::uint32_t bytesPerFrame = 0;
     std::uint32_t blockFrames = 0;
-    bool failed = false;
     std::vector<std::uint8_t> raw;
+#ifdef AMBIXFILE_ENABLE_WAVPACK
+    detail::WvEncoder* wv = nullptr;
+    std::vector<std::int32_t> ints;
+#endif
 
-    Status begin(const WriterConfig& config);
+    Impl() = default;
+    Impl(const Impl&) = delete;
+    Impl& operator=(const Impl&) = delete;
+    ~Impl() {
+#ifdef AMBIXFILE_ENABLE_WAVPACK
+        if (wv) detail::wvCloseEncoder(wv, std::vector<std::uint8_t>());
+#endif
+    }
+
+    Status configure(const WriterConfig& config);
+    void start();
     Status finish();
 
     template <typename T>
     std::int64_t write(const T* src, std::int64_t frames) {
-        if (!stream || !src || frames <= 0 || failed) return 0;
+        if (!stream || !src || frames <= 0) return 0;
+        if (!started) start();
+        if (failed) return 0;
         const std::uint32_t channels = info.fileChannels();
         std::int64_t total = 0;
         while (frames > 0) {
             const std::int64_t n = frames < blockFrames ? frames : static_cast<std::int64_t>(blockFrames);
-            detail::encodeSamples(src, raw.data(), static_cast<std::size_t>(n) * channels, info.sampleFormat,
-                                  info.bigEndian);
-            const std::size_t bytes = static_cast<std::size_t>(n) * bytesPerFrame;
-            const std::size_t written = stream->write(raw.data(), bytes);
-            const std::int64_t done = static_cast<std::int64_t>(written / bytesPerFrame);
+            const std::size_t count = static_cast<std::size_t>(n) * channels;
+            std::int64_t done = 0;
+#ifdef AMBIXFILE_ENABLE_WAVPACK
+            if (info.container == Container::WavPack) {
+                if (info.sampleFormat == SampleFormat::Float32) {
+                    for (std::size_t i = 0; i < count; ++i)
+                        ints[i] = detail::bitCast<std::int32_t>(static_cast<float>(src[i]));
+                } else {
+                    const double scale = static_cast<double>(std::uint64_t(1) << (bytesPerFrame / channels * 8 - 1));
+                    for (std::size_t i = 0; i < count; ++i)
+                        ints[i] = static_cast<std::int32_t>(detail::toFixed(static_cast<double>(src[i]), scale));
+                }
+                done = detail::wvPack(wv, ints.data(), static_cast<std::uint32_t>(n)) ? n : 0;
+            } else
+#endif
+            {
+                detail::encodeSamples(src, raw.data(), count, info.sampleFormat, info.bigEndian);
+                const std::size_t bytes = static_cast<std::size_t>(n) * bytesPerFrame;
+                done = static_cast<std::int64_t>(stream->write(raw.data(), bytes) / bytesPerFrame);
+            }
             total += done;
             info.frames += static_cast<std::uint64_t>(done);
-            if (written != bytes) {
+            if (done != n) {
                 failed = true;
                 break;
             }
-            src += static_cast<std::size_t>(n) * channels;
+            src += count;
             frames -= n;
         }
         return total;
     }
 };
 
-Status Writer::Impl::begin(const WriterConfig& config) {
+Status Writer::Impl::configure(const WriterConfig& config) {
     using namespace detail;
     if (!(config.sampleRate > 0.0) || !std::isfinite(config.sampleRate)) return Status::InvalidArgument;
     const std::uint64_t channels64 = static_cast<std::uint64_t>(config.ambiChannels) + config.extraChannels;
@@ -77,7 +95,7 @@ Status Writer::Impl::begin(const WriterConfig& config) {
         if (chunk.type == kChunkDesc || chunk.type == kChunkData) return Status::InvalidArgument;
 
     std::uint32_t order = 0;
-    Matrix adaptor = config.adaptorMatrix;
+    adaptor = config.adaptorMatrix;
     if (adaptor.empty()) {
         if (!channelsToOrder(config.ambiChannels, order)) return Status::InvalidArgument;
         if (config.extraChannels > 0) adaptor = Matrix::identity(config.ambiChannels);
@@ -89,84 +107,93 @@ Status Writer::Impl::begin(const WriterConfig& config) {
     info.sampleRate = config.sampleRate;
     info.sampleFormat = config.sampleFormat;
     info.bigEndian = config.bigEndian;
+    info.container = config.container;
     info.fileFormat = adaptor.empty() ? FileFormat::Basic : FileFormat::Extended;
     info.ambiChannels = config.ambiChannels;
     info.extraChannels = config.extraChannels;
     info.fullAmbiChannels = adaptor.empty() ? config.ambiChannels : adaptor.rows();
 
-    const std::uint32_t sampleBytes = bytesPerSample(config.sampleFormat);
-    const bool isFloat = config.sampleFormat == SampleFormat::Float32 || config.sampleFormat == SampleFormat::Float64;
-    bytesPerFrame = channels * sampleBytes;
+    if (config.container == Container::WavPack) {
+        if (!wavpackAvailable()) return Status::UnsupportedFormat;
+        if (config.wavpackHybridBits != 0.0f &&
+            !(config.wavpackHybridBits >= 2.0f && config.wavpackHybridBits <= 23.9f))
+            return Status::InvalidArgument;
+        // WavPack takes whole-number sample rates and has no 64-bit floats.
+        if (config.sampleRate != std::floor(config.sampleRate) || config.sampleRate > 2147483647.0)
+            return Status::InvalidArgument;
+        if (info.sampleFormat == SampleFormat::Float64) info.sampleFormat = SampleFormat::Float32;
+        info.lossy = config.wavpackHybridBits != 0.0f;
+        hybridBits = config.wavpackHybridBits;
+        threads = config.wavpackThreads;
+    }
+
+    chunks = config.chunks;
+    markers = config.markers;
+    regions = config.regions;
+    bytesPerFrame = channels * bytesPerSample(info.sampleFormat);
     blockFrames = blockFramesFor(channels);
-    raw.resize(static_cast<std::size_t>(blockFrames) * bytesPerFrame);
-
-    std::vector<std::uint8_t> head;
-    appendBytes(head, "caff", 4);
-    appendBytes(head, "\0\1\0\0", 4); // version 1, flags 0
-
-    appendChunkHeader(head, kChunkDesc, static_cast<std::int64_t>(kDescSize));
-    appendBE64(head, bitCast<std::uint64_t>(config.sampleRate));
-    appendBE32(head, kFormatLpcm);
-    appendBE32(head, (isFloat ? kLpcmFlagFloat : 0u) | (config.bigEndian ? 0u : kLpcmFlagLittleEndian));
-    appendBE32(head, bytesPerFrame);
-    appendBE32(head, 1);
-    appendBE32(head, channels);
-    appendBE32(head, sampleBytes * 8);
-
-    if (!adaptor.empty()) {
-        const std::size_t count = static_cast<std::size_t>(adaptor.rows()) * adaptor.cols();
-        appendChunkHeader(head, kChunkUuid, static_cast<std::int64_t>(kUuidSize + 8 + count * 4));
-        appendBytes(head, kAmbixUuid, kUuidSize);
-        appendBE32(head, adaptor.rows());
-        appendBE32(head, adaptor.cols());
-        for (std::size_t i = 0; i < count; ++i) appendBE32(head, bitCast<std::uint32_t>(adaptor.data()[i]));
-    }
-
-    for (const Chunk& chunk : config.chunks) {
-        appendChunkHeader(head, chunk.type, static_cast<std::int64_t>(chunk.data.size()));
-        appendBytes(head, chunk.data.data(), chunk.data.size());
-    }
-
-    // The data size stays -1 ("until end of file") until close() patches it,
-    // so a file from an interrupted recording is still readable.
-    appendBE32(head, kChunkData);
-    dataSizeOffset = static_cast<std::int64_t>(head.size());
-    appendBE64(head, static_cast<std::uint64_t>(std::int64_t(-1)));
-    appendBE32(head, 0); // edit count
-    dataStart = static_cast<std::int64_t>(head.size());
-
-    if (stream->write(head.data(), head.size()) != head.size()) return Status::IoError;
     return Status::Ok;
+}
+
+// Write everything that precedes the audio. Deferred until the first write()
+// or close() so that metadata added after open() still lands in the header.
+void Writer::Impl::start() {
+    using namespace detail;
+    started = true;
+    const std::vector<std::uint8_t> head =
+        buildCafHead(info, adaptor, chunks, markers, regions, nextId, dataSizeOffset);
+    chunks.clear();
+    markers.clear();
+    regions.clear();
+    const std::uint32_t channels = info.fileChannels();
+
+    if (info.container == Container::WavPack) {
+#ifdef AMBIXFILE_ENABLE_WAVPACK
+        Status status = Status::Ok;
+        wv = wvOpenEncoder(*stream, info, hybridBits, threads, head, status);
+        if (!wv) failed = true;
+        ints.resize(static_cast<std::size_t>(blockFrames) * channels);
+#else
+        failed = true;
+#endif
+        return;
+    }
+    raw.resize(static_cast<std::size_t>(blockFrames) * channels * bytesPerSample(info.sampleFormat));
+    dataStart = static_cast<std::int64_t>(head.size());
+    if (stream->write(head.data(), head.size()) != head.size()) failed = true;
 }
 
 Status Writer::Impl::finish() {
     using namespace detail;
+    if (!started) start();
     Status status = failed ? Status::IoError : Status::Ok;
-    const std::int64_t dataBytes = static_cast<std::int64_t>(info.frames) * bytesPerFrame;
-    std::uint8_t size[8];
-    storeBE64(size, static_cast<std::uint64_t>(dataBytes + 4));
 
-    // A stream that cannot seek keeps the "until end of file" size, which is
-    // valid as long as nothing follows the audio.
-    bool sized = false;
-    if (stream->seek(dataSizeOffset)) {
-        sized = stream->write(size, 8) == 8 && stream->seek(dataStart + dataBytes);
-        if (!sized) status = Status::IoError;
-    }
-    if (!trailing.empty()) {
-        if (!sized) {
-            status = Status::IoError;
-        } else {
-            for (const Chunk& chunk : trailing) {
-                std::vector<std::uint8_t> header;
-                appendChunkHeader(header, chunk.type, static_cast<std::int64_t>(chunk.data.size()));
-                if (stream->write(header.data(), header.size()) != header.size() ||
-                    stream->write(chunk.data.data(), chunk.data.size()) != chunk.data.size()) {
-                    status = Status::IoError;
-                    break;
-                }
-            }
+    std::vector<std::uint8_t> tail;
+    appendMetadataChunks(tail, chunks, markers, regions, nextId);
+
+    if (info.container == Container::WavPack) {
+#ifdef AMBIXFILE_ENABLE_WAVPACK
+        if (wv) {
+            const Status closed = wvCloseEncoder(wv, tail);
+            wv = nullptr;
+            if (closed != Status::Ok) status = closed;
         }
+        // WavPack cannot represent a file without audio: no decoder opens it.
+        if (status == Status::Ok && info.frames == 0) status = Status::UnsupportedFormat;
+#endif
+    } else {
+        const std::int64_t dataBytes = static_cast<std::int64_t>(info.frames) * bytesPerFrame;
+        std::uint8_t size[8];
+        storeBE64(size, static_cast<std::uint64_t>(dataBytes + 4));
+        // A stream that cannot seek keeps the "until end of file" size, which
+        // is valid as long as nothing follows the audio.
+        bool sized = false;
+        if (stream->seek(dataSizeOffset)) {
+            sized = stream->write(size, 8) == 8 && stream->seek(dataStart + dataBytes);
+            if (!sized) status = Status::IoError;
+        }
+        if (!tail.empty() && (!sized || stream->write(tail.data(), tail.size()) != tail.size()))
+            status = Status::IoError;
     }
     if (!stream->flush()) status = Status::IoError;
     return status;
@@ -186,6 +213,10 @@ Writer& Writer::operator=(Writer&& other) noexcept {
 }
 
 Status Writer::open(const char* utf8Path, const WriterConfig& config) {
+    // Check the configuration first so a bad one does not truncate the file.
+    Impl probe;
+    const Status valid = probe.configure(config);
+    if (valid != Status::Ok) return valid;
     std::unique_ptr<Stream> stream = openFileStream(utf8Path, true);
     if (!stream) return Status::IoError;
     return open(std::move(stream), config);
@@ -202,10 +233,13 @@ Status Writer::open(std::unique_ptr<Stream> stream, const WriterConfig& config) 
 Status Writer::open(Stream& stream, const WriterConfig& config) {
     if (isOpen()) close();
     impl_.reset(new Impl);
+    const Status status = impl_->configure(config);
+    if (status != Status::Ok) {
+        impl_.reset(new Impl);
+        return status;
+    }
     impl_->stream = &stream;
-    const Status status = impl_->begin(config);
-    if (status != Status::Ok) impl_.reset(new Impl);
-    return status;
+    return Status::Ok;
 }
 
 bool Writer::isOpen() const noexcept { return impl_ && impl_->stream; }
@@ -222,10 +256,22 @@ std::int64_t Writer::write(const double* interleaved, std::int64_t frames) {
     return impl_ ? impl_->write(interleaved, frames) : 0;
 }
 
-Status Writer::addTrailingChunk(Chunk chunk) {
+Status Writer::addMarker(Marker marker) {
+    if (!isOpen()) return Status::NotOpen;
+    impl_->markers.push_back(std::move(marker));
+    return Status::Ok;
+}
+
+Status Writer::addRegion(Region region) {
+    if (!isOpen()) return Status::NotOpen;
+    impl_->regions.push_back(std::move(region));
+    return Status::Ok;
+}
+
+Status Writer::addChunk(Chunk chunk) {
     if (!isOpen()) return Status::NotOpen;
     if (chunk.type == detail::kChunkDesc || chunk.type == detail::kChunkData) return Status::InvalidArgument;
-    impl_->trailing.push_back(std::move(chunk));
+    impl_->chunks.push_back(std::move(chunk));
     return Status::Ok;
 }
 

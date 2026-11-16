@@ -71,6 +71,12 @@ constexpr std::uint32_t kChunkDesc = fourCC('d', 'e', 's', 'c');
 constexpr std::uint32_t kChunkData = fourCC('d', 'a', 't', 'a');
 constexpr std::uint32_t kChunkUuid = fourCC('u', 'u', 'i', 'd');
 constexpr std::uint32_t kChunkFree = fourCC('f', 'r', 'e', 'e');
+constexpr std::uint32_t kChunkMark = fourCC('m', 'a', 'r', 'k');
+constexpr std::uint32_t kChunkRegn = fourCC('r', 'e', 'g', 'n');
+constexpr std::uint32_t kChunkStrg = fourCC('s', 't', 'r', 'g');
+constexpr std::uint32_t kMarkerRegionStart = fourCC('r', 'b', 'e', 'g');
+constexpr std::uint32_t kMarkerRegionEnd = fourCC('r', 'e', 'n', 'd');
+constexpr std::size_t kMarkerSize = 28;
 constexpr std::uint32_t kFormatLpcm = fourCC('l', 'p', 'c', 'm');
 constexpr std::uint32_t kLpcmFlagFloat = 1u << 0;
 constexpr std::uint32_t kLpcmFlagLittleEndian = 1u << 1;
@@ -206,6 +212,61 @@ inline void encodeSamples(const T* src, std::uint8_t* dst, std::size_t count, Sa
         break;
     }
 }
+
+// ---- CAF header parsing and building (caf.cpp) ----
+
+struct ParsedCaf {
+    Info info;
+    Matrix adaptor;
+    std::vector<Chunk> chunks;
+    std::vector<Marker> markers;
+    std::vector<Region> regions;
+    std::uint32_t channels = 0;
+    std::int64_t dataStart = 0;
+};
+
+// Parse a CAF stream up to (and, where possible, past) its audio data.
+// With 'wrapper' set the stream is a CAF header as stored inside a WavPack
+// file: its data chunk holds no audio and further chunks may follow directly.
+Status parseCaf(Stream& stream, bool wrapper, ParsedCaf& out);
+
+// Fill in the ambiX layout fields of 'info' for a file with 'channels'
+// channels and the given adaptor matrix (empty if the file has none).
+Status applyLayout(Info& info, const Matrix& adaptor, std::uint32_t channels);
+
+// Append 'mark', 'regn', 'strg' and user chunks. 'nextId' supplies marker IDs
+// that stay unique when this is called more than once for a file.
+void appendMetadataChunks(std::vector<std::uint8_t>& out, const std::vector<Chunk>& chunks,
+                          const std::vector<Marker>& markers, const std::vector<Region>& regions,
+                          std::uint32_t& nextId);
+
+// Everything from the file header to the start of the audio samples. The
+// data chunk gets the "until end of file" size; its size field is at
+// 'dataSizeOffset'.
+std::vector<std::uint8_t> buildCafHead(const Info& info, const Matrix& adaptor, const std::vector<Chunk>& chunks,
+                                       const std::vector<Marker>& markers, const std::vector<Region>& regions,
+                                       std::uint32_t& nextId, std::int64_t& dataSizeOffset);
+
+// ---- WavPack backend (wavpack.cpp) ----
+
+#ifdef AMBIXFILE_ENABLE_WAVPACK
+struct WvDecoder;
+struct WvEncoder;
+
+// Opens a WavPack stream and fills 'out' (layout, metadata, frame count).
+// 'bits' and 'isFloat' describe the int32 values wvUnpack() delivers.
+WvDecoder* wvOpenDecoder(Stream& stream, int threads, ParsedCaf& out, int& bits, bool& isFloat, Status& status);
+void wvCloseDecoder(WvDecoder* decoder) noexcept;
+std::uint32_t wvUnpack(WvDecoder* decoder, std::int32_t* buffer, std::uint32_t frames);
+bool wvSeek(WvDecoder* decoder, std::uint64_t frame);
+
+WvEncoder* wvOpenEncoder(Stream& stream, const Info& info, float hybridBits, int threads,
+                         const std::vector<std::uint8_t>& wrapper, Status& status);
+bool wvPack(WvEncoder* encoder, std::int32_t* buffer, std::uint32_t frames);
+// Finishes and frees the encoder. 'trailer' (may be empty) is stored as
+// trailing wrapper data.
+Status wvCloseEncoder(WvEncoder* encoder, const std::vector<std::uint8_t>& trailer);
+#endif
 
 } // namespace detail
 } // namespace ambixfile

@@ -3,89 +3,93 @@
 
 #include "internal.hpp"
 
-#include <limits>
-
 namespace ambixfile {
-namespace detail {
 
-// Chunks larger than this are skipped instead of being loaded into memory.
-constexpr std::int64_t kMaxStoredChunkSize = std::int64_t(1) << 28;
-constexpr std::uint32_t kMaxChannels = 65536;
-
-// Payload after the UUID: rows (uint32), cols (uint32), rows*cols float32 in
-// row-major order. CAF chunk data is big-endian; files with little-endian
-// payloads exist, so that order is accepted when it is the one that fits.
-inline bool parseAdaptorPayload(const std::uint8_t* p, std::size_t size, Matrix& out) {
-    if (size < 8) return false;
-    for (int attempt = 0; attempt < 2; ++attempt) {
-        const bool be = attempt == 0;
-        const std::uint32_t rows = be ? loadBE32(p) : loadLE32(p);
-        const std::uint32_t cols = be ? loadBE32(p + 4) : loadLE32(p + 4);
-        if (rows == 0 || cols == 0) continue;
-        if (static_cast<std::uint64_t>(rows) * cols * 4 + 8 != size) continue;
-        Matrix m(rows, cols);
-        float* values = m.data();
-        const std::size_t count = static_cast<std::size_t>(rows) * cols;
-        for (std::size_t i = 0; i < count; ++i)
-            values[i] = bitCast<float>(be ? loadBE32(p + 8 + i * 4) : loadLE32(p + 8 + i * 4));
-        out = std::move(m);
-        return true;
-    }
+bool wavpackAvailable() noexcept {
+#ifdef AMBIXFILE_ENABLE_WAVPACK
+    return true;
+#else
     return false;
+#endif
 }
-
-} // namespace detail
 
 struct Reader::Impl {
     std::unique_ptr<Stream> owned;
     Stream* stream = nullptr;
-    Info info;
-    Matrix adaptor;
-    std::vector<Chunk> chunks;
+    detail::ParsedCaf file;
     bool passThrough = true; // the Ambisonics channels need no matrixing
-    std::int64_t dataStart = 0;
     std::uint32_t bytesPerFrame = 0;
     std::uint32_t blockFrames = 0;
     std::uint64_t pos = 0;
     std::vector<std::uint8_t> raw;
     std::vector<float> scratchF;
     std::vector<double> scratchD;
+#ifdef AMBIXFILE_ENABLE_WAVPACK
+    detail::WvDecoder* wv = nullptr;
+    std::vector<std::int32_t> ints;
+    int wvBits = 0;
+    bool wvFloat = false;
+#endif
 
-    Status parse();
+    Impl() = default;
+    Impl(const Impl&) = delete;
+    Impl& operator=(const Impl&) = delete;
+    ~Impl() {
+#ifdef AMBIXFILE_ENABLE_WAVPACK
+        if (wv) detail::wvCloseDecoder(wv);
+#endif
+    }
+
+    Status begin(const ReaderConfig& config);
 
     template <typename T>
     std::int64_t readRaw(T* dst, std::int64_t frames) {
         if (!stream || !dst || frames <= 0) return 0;
+        const Info& info = file.info;
         const std::uint32_t channels = info.fileChannels();
         std::int64_t total = 0;
         while (frames > 0 && pos < info.frames) {
             std::uint64_t want = static_cast<std::uint64_t>(frames);
             if (want > blockFrames) want = blockFrames;
             if (want > info.frames - pos) want = info.frames - pos;
-            const std::size_t bytes = stream->read(raw.data(), static_cast<std::size_t>(want) * bytesPerFrame);
-            const std::uint64_t got = bytes / bytesPerFrame;
-            detail::decodeSamples(raw.data(), dst, static_cast<std::size_t>(got) * channels, info.sampleFormat,
-                                  info.bigEndian);
+            std::uint64_t got = 0;
+#ifdef AMBIXFILE_ENABLE_WAVPACK
+            if (wv) {
+                got = detail::wvUnpack(wv, ints.data(), static_cast<std::uint32_t>(want));
+                const std::size_t count = static_cast<std::size_t>(got) * channels;
+                if (wvFloat) {
+                    for (std::size_t i = 0; i < count; ++i) dst[i] = static_cast<T>(detail::bitCast<float>(ints[i]));
+                } else {
+                    const double scale = 1.0 / static_cast<double>(std::uint64_t(1) << (wvBits - 1));
+                    for (std::size_t i = 0; i < count; ++i) dst[i] = static_cast<T>(ints[i] * scale);
+                }
+            } else
+#endif
+            {
+                const std::size_t bytes = stream->read(raw.data(), static_cast<std::size_t>(want) * bytesPerFrame);
+                got = bytes / bytesPerFrame;
+                detail::decodeSamples(raw.data(), dst, static_cast<std::size_t>(got) * channels, info.sampleFormat,
+                                      info.bigEndian);
+                if (got < want) // short read: realign the stream to a frame boundary
+                    stream->seek(file.dataStart + static_cast<std::int64_t>(pos + got) * bytesPerFrame);
+            }
             dst += got * channels;
             pos += got;
             total += static_cast<std::int64_t>(got);
             frames -= static_cast<std::int64_t>(got);
-            if (got < want) {
-                // Short read: realign the stream to a frame boundary.
-                stream->seek(dataStart + static_cast<std::int64_t>(pos) * bytesPerFrame);
-                break;
-            }
+            if (got < want) break;
         }
         return total;
     }
 
     template <typename T>
     std::int64_t readAmbi(T* ambi, T* extra, std::int64_t frames, std::vector<T>& scratch) {
+        const Info& info = file.info;
         const std::uint32_t channels = info.fileChannels();
         const std::uint32_t inAmbi = info.ambiChannels;
         const std::uint32_t outAmbi = info.fullAmbiChannels;
         const std::uint32_t numExtra = info.extraChannels;
-        const float* matrix = adaptor.data();
+        const float* matrix = file.adaptor.data();
         std::int64_t total = 0;
         while (frames > 0) {
             const std::int64_t want = frames < blockFrames ? frames : static_cast<std::int64_t>(blockFrames);
@@ -118,140 +122,41 @@ struct Reader::Impl {
     }
 };
 
-Status Reader::Impl::parse() {
-    using namespace detail;
+Status Reader::Impl::begin(const ReaderConfig& config) {
     Stream& s = *stream;
-    const std::int64_t streamSize = s.size();
-    std::uint8_t header[kDescSize];
-
+    std::uint8_t magic[4] = {};
     if (!s.seek(0)) return Status::IoError;
-    if (s.read(header, kFileHeaderSize) != kFileHeaderSize || std::memcmp(header, "caff", 4) != 0)
-        return Status::NotCaf;
-    if (loadBE16(header + 4) != 1) return Status::UnsupportedFormat;
+    const bool isWavPack = s.read(magic, 4) == 4 && std::memcmp(magic, "wvpk", 4) == 0;
 
-    bool haveDesc = false, haveData = false, haveAdaptor = false, badAdaptor = false;
-    std::uint32_t channels = 0;
-    std::int64_t dataBytes = 0;
-    std::int64_t offset = static_cast<std::int64_t>(kFileHeaderSize);
-
-    for (;;) {
-        if (streamSize >= 0 && offset + static_cast<std::int64_t>(kChunkHeaderSize) > streamSize) break;
-        if (!s.seek(offset)) {
-            if (haveData) break;
-            return Status::IoError;
-        }
-        const std::size_t got = s.read(header, kChunkHeaderSize);
-        if (got == 0) break;
-        if (got != kChunkHeaderSize) {
-            if (haveData) break;
-            return Status::InvalidFile;
-        }
-        const std::uint32_t type = loadBE32(header);
-        const std::int64_t size = static_cast<std::int64_t>(loadBE64(header + 4));
-        const std::int64_t payload = offset + static_cast<std::int64_t>(kChunkHeaderSize);
-
-        if (type == kChunkData) {
-            if (!haveDesc || haveData) return Status::InvalidFile;
-            // The payload starts with a 4-byte edit count. A size of -1 means
-            // the audio runs to the end of the file.
-            if (size == -1 || (streamSize >= 0 && size > streamSize - payload)) {
-                if (streamSize < 0) return Status::UnsupportedFormat;
-                dataBytes = streamSize - payload - 4;
-            } else {
-                dataBytes = size - 4;
-            }
-            if (size < -1 || dataBytes < 0) return Status::InvalidFile;
-            dataStart = payload + 4;
-            haveData = true;
-            if (size == -1) break;
-            offset = payload + size;
-            continue;
-        }
-
-        if (size < 0 || size > std::numeric_limits<std::int64_t>::max() - payload) {
-            if (haveData) break;
-            return Status::InvalidFile;
-        }
-        if (streamSize >= 0 && size > streamSize - payload) {
-            if (haveData) break; // truncated trailing chunk: keep the audio
-            return Status::InvalidFile;
-        }
-
-        if (type == kChunkDesc) {
-            if (haveDesc || size < static_cast<std::int64_t>(kDescSize)) return Status::InvalidFile;
-            if (s.read(header, kDescSize) != kDescSize) return Status::InvalidFile;
-            const double sampleRate = bitCast<double>(loadBE64(header));
-            const std::uint32_t formatId = loadBE32(header + 8);
-            const std::uint32_t flags = loadBE32(header + 12);
-            const std::uint32_t bytesPerPacket = loadBE32(header + 16);
-            const std::uint32_t framesPerPacket = loadBE32(header + 20);
-            channels = loadBE32(header + 24);
-            const std::uint32_t bits = loadBE32(header + 28);
-
-            if (formatId != kFormatLpcm) return Status::UnsupportedFormat;
-            if (!(sampleRate > 0.0) || !std::isfinite(sampleRate)) return Status::InvalidFile;
-            if (channels == 0 || channels > kMaxChannels) return Status::UnsupportedFormat;
-            const bool isFloat = (flags & kLpcmFlagFloat) != 0;
-            if (isFloat && bits == 32) info.sampleFormat = SampleFormat::Float32;
-            else if (isFloat && bits == 64) info.sampleFormat = SampleFormat::Float64;
-            else if (!isFloat && bits == 16) info.sampleFormat = SampleFormat::Int16;
-            else if (!isFloat && bits == 24) info.sampleFormat = SampleFormat::Int24;
-            else if (!isFloat && bits == 32) info.sampleFormat = SampleFormat::Int32;
-            else return Status::UnsupportedFormat;
-            if (framesPerPacket != 1 || bytesPerPacket != channels * (bits / 8)) return Status::UnsupportedFormat;
-            info.sampleRate = sampleRate;
-            info.bigEndian = (flags & kLpcmFlagLittleEndian) == 0;
-            haveDesc = true;
-        } else if (type != kChunkFree && size <= kMaxStoredChunkSize) {
-            Chunk chunk;
-            chunk.type = type;
-            chunk.data.resize(static_cast<std::size_t>(size));
-            if (s.read(chunk.data.data(), chunk.data.size()) != chunk.data.size()) {
-                if (haveData) break;
-                return Status::InvalidFile;
-            }
-            const bool isAmbix = type == kChunkUuid && chunk.data.size() >= kUuidSize &&
-                                 (std::memcmp(chunk.data.data(), kAmbixUuid, kUuidSize) == 0 ||
-                                  std::memcmp(chunk.data.data(), kAmbixUuidLegacy, kUuidSize) == 0);
-            if (!isAmbix) {
-                chunks.push_back(std::move(chunk));
-            } else if (!haveAdaptor) {
-                haveAdaptor = true;
-                badAdaptor = !parseAdaptorPayload(chunk.data.data() + kUuidSize, chunk.data.size() - kUuidSize, adaptor);
-            }
-        }
-        offset = payload + size;
-    }
-
-    if (!haveDesc || !haveData) return Status::InvalidFile;
-    if (badAdaptor) return Status::InvalidAdaptorMatrix;
-
-    bytesPerFrame = channels * bytesPerSample(info.sampleFormat);
-    info.frames = static_cast<std::uint64_t>(dataBytes) / bytesPerFrame;
-
-    std::uint32_t order = 0;
-    if (haveAdaptor) {
-        if (adaptor.cols() > channels || !channelsToOrder(adaptor.rows(), order)) return Status::InvalidAdaptorMatrix;
-        info.fileFormat = FileFormat::Extended;
-        info.ambiChannels = adaptor.cols();
-        info.fullAmbiChannels = adaptor.rows();
-        passThrough = adaptor.isIdentity(0.0f);
-    } else if (channelsToOrder(channels, order)) {
-        info.fileFormat = FileFormat::Basic;
-        info.ambiChannels = info.fullAmbiChannels = channels;
+    if (isWavPack) {
+#ifdef AMBIXFILE_ENABLE_WAVPACK
+        Status status = Status::Ok;
+        wv = detail::wvOpenDecoder(s, config.wavpackThreads, file, wvBits, wvFloat, status);
+        if (!wv) return status;
+#else
+        (void)config;
+        return Status::UnsupportedFormat;
+#endif
     } else {
-        info.fileFormat = FileFormat::None;
-        info.ambiChannels = info.fullAmbiChannels = 0;
+        const Status status = detail::parseCaf(s, false, file);
+        if (status != Status::Ok) return status;
+        if (!s.seek(file.dataStart)) return Status::IoError;
     }
-    info.extraChannels = channels - info.ambiChannels;
 
-    blockFrames = blockFramesFor(channels);
-    raw.resize(static_cast<std::size_t>(blockFrames) * bytesPerFrame);
+    const Info& info = file.info;
+    const std::uint32_t channels = info.fileChannels();
+    passThrough = file.adaptor.empty() || file.adaptor.isIdentity(0.0f);
+    bytesPerFrame = channels * detail::bytesPerSample(info.sampleFormat);
+    blockFrames = detail::blockFramesFor(channels);
     scratchF.resize(static_cast<std::size_t>(blockFrames) * channels);
     scratchD.resize(static_cast<std::size_t>(blockFrames) * channels);
-
+#ifdef AMBIXFILE_ENABLE_WAVPACK
+    if (wv) ints.resize(static_cast<std::size_t>(blockFrames) * channels);
+    else
+#endif
+        raw.resize(static_cast<std::size_t>(blockFrames) * bytesPerFrame);
     pos = 0;
-    return s.seek(dataStart) ? Status::Ok : Status::IoError;
+    return Status::Ok;
 }
 
 Reader::Reader() : impl_(new Impl) {}
@@ -259,25 +164,24 @@ Reader::~Reader() = default;
 Reader::Reader(Reader&&) noexcept = default;
 Reader& Reader::operator=(Reader&&) noexcept = default;
 
-Status Reader::open(const char* utf8Path) {
+Status Reader::open(const char* utf8Path, const ReaderConfig& config) {
     std::unique_ptr<Stream> stream = openFileStream(utf8Path, false);
     if (!stream) return Status::IoError;
-    return open(std::move(stream));
+    return open(std::move(stream), config);
 }
 
-Status Reader::open(std::unique_ptr<Stream> stream) {
+Status Reader::open(std::unique_ptr<Stream> stream, const ReaderConfig& config) {
     if (!stream) return Status::InvalidArgument;
     Stream& ref = *stream;
-    const Status status = open(ref);
+    const Status status = open(ref, config);
     if (status == Status::Ok) impl_->owned = std::move(stream);
-    else close(); // drop the reference before the stream is destroyed
     return status;
 }
 
-Status Reader::open(Stream& stream) {
+Status Reader::open(Stream& stream, const ReaderConfig& config) {
     impl_.reset(new Impl);
     impl_->stream = &stream;
-    const Status status = impl_->parse();
+    const Status status = impl_->begin(config);
     if (status != Status::Ok) impl_.reset(new Impl);
     return status;
 }
@@ -287,15 +191,23 @@ bool Reader::isOpen() const noexcept { return impl_ && impl_->stream; }
 
 const Info& Reader::info() const noexcept {
     static const Info none;
-    return impl_ ? impl_->info : none;
+    return impl_ ? impl_->file.info : none;
 }
 const Matrix& Reader::adaptorMatrix() const noexcept {
     static const Matrix none;
-    return impl_ ? impl_->adaptor : none;
+    return impl_ ? impl_->file.adaptor : none;
 }
 const std::vector<Chunk>& Reader::chunks() const noexcept {
     static const std::vector<Chunk> none;
-    return impl_ ? impl_->chunks : none;
+    return impl_ ? impl_->file.chunks : none;
+}
+const std::vector<Marker>& Reader::markers() const noexcept {
+    static const std::vector<Marker> none;
+    return impl_ ? impl_->file.markers : none;
+}
+const std::vector<Region>& Reader::regions() const noexcept {
+    static const std::vector<Region> none;
+    return impl_ ? impl_->file.regions : none;
 }
 
 std::int64_t Reader::read(float* interleaved, std::int64_t frames) {
@@ -313,9 +225,18 @@ std::int64_t Reader::readAmbisonics(double* ambi, double* extra, std::int64_t fr
 
 bool Reader::seek(std::uint64_t frame) {
     if (!isOpen()) return false;
-    if (frame > impl_->info.frames) frame = impl_->info.frames;
-    if (!impl_->stream->seek(impl_->dataStart + static_cast<std::int64_t>(frame) * impl_->bytesPerFrame)) return false;
-    impl_->pos = frame;
+    Impl& impl = *impl_;
+    if (frame > impl.file.info.frames) frame = impl.file.info.frames;
+#ifdef AMBIXFILE_ENABLE_WAVPACK
+    if (impl.wv) {
+        // WavPack cannot seek to the very end; reading there returns nothing anyway.
+        if (frame < impl.file.info.frames && !detail::wvSeek(impl.wv, frame)) return false;
+        impl.pos = frame;
+        return true;
+    }
+#endif
+    if (!impl.stream->seek(impl.file.dataStart + static_cast<std::int64_t>(frame) * impl.bytesPerFrame)) return false;
+    impl.pos = frame;
     return true;
 }
 

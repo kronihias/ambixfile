@@ -6,7 +6,8 @@ Usage: amalgamate.py [output path]   (default: single_include/ambixfile.hpp)
 
 The result holds the public header, followed by the implementation inside
 #ifdef AMBIXFILE_IMPLEMENTATION. Define that macro in exactly one source file
-before including the header.
+before including the header. Also define AMBIXFILE_ENABLE_WAVPACK there (and
+have wavpack.h on the include path) for WavPack support.
 """
 import pathlib
 import re
@@ -14,7 +15,8 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 PUBLIC = "include/ambixfile/ambixfile.hpp"
-SOURCES = ["src/internal.hpp", "src/stream.cpp", "src/matrix.cpp", "src/reader.cpp", "src/writer.cpp"]
+SOURCES = ["src/internal.hpp", "src/stream.cpp", "src/matrix.cpp", "src/caf.cpp", "src/wavpack.cpp",
+           "src/reader.cpp", "src/writer.cpp"]
 LOCAL_INCLUDE = re.compile(r'^\s*#\s*include\s+"')
 
 

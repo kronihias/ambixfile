@@ -79,5 +79,23 @@ int main() {
     CHECK(std::fabs(f3(15, 9) - std::sqrt(8.0f / 5.0f)) < 1e-6f);    // Q from ACN 9
     CHECK(fumaToAmbix(4).empty());
 
+    // Furse-Malham channel sets
+    const struct { std::uint32_t channels, rows; } sets[] = {{1, 1}, {3, 4}, {4, 4}, {5, 9},  {6, 9},
+                                                             {7, 16}, {8, 16}, {9, 9}, {11, 16}, {16, 16}};
+    for (const auto& set : sets) {
+        const Matrix expand = fumaChannelsToAmbix(set.channels);
+        const Matrix reduce = ambixToFumaChannels(set.channels);
+        CHECK(expand.rows() == set.rows && expand.cols() == set.channels);
+        CHECK(reduce.rows() == set.channels && reduce.cols() == set.rows);
+        CHECK(reduce.multiplied(expand).isIdentity(1e-6f)); // FuMa -> ambiX -> FuMa
+    }
+    CHECK(fumaChannelsToAmbix(16).approxEquals(fumaToAmbix(3)) && fumaChannelsToAmbix(9).approxEquals(fumaToAmbix(2)));
+    CHECK(fumaChannelsToAmbix(2).empty() && fumaChannelsToAmbix(10).empty() && ambixToFumaChannels(0).empty());
+    // WXYUV: U feeds ACN 8, V feeds ACN 4, and nothing feeds Z (ACN 2).
+    const Matrix h2 = fumaChannelsToAmbix(5);
+    CHECK(std::fabs(h2(8, 3) - std::sqrt(3.0f) / 2.0f) < 1e-6f && std::fabs(h2(4, 4) - std::sqrt(3.0f) / 2.0f) < 1e-6f);
+    CHECK(h2(3, 1) == 1.0f && h2(1, 2) == 1.0f);
+    for (std::uint32_t c = 0; c < 5; ++c) CHECK(h2(2, c) == 0.0f && h2(6, c) == 0.0f);
+
     return finish("test_matrix");
 }

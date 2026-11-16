@@ -9,6 +9,10 @@
 // reduced channel set to the full set, and may hold extra non-Ambisonics
 // channels after the Ambisonics ones.
 //
+// Files can also be stored losslessly (or lossy) compressed with WavPack when
+// the library is built with AMBIXFILE_ENABLE_WAVPACK; the reader detects the
+// container by itself.
+//
 // No exceptions are thrown to report errors; functions return Status values.
 // The read() and write() calls do not allocate.
 
@@ -18,11 +22,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
 #define AMBIXFILE_VERSION_MAJOR 0
-#define AMBIXFILE_VERSION_MINOR 1
+#define AMBIXFILE_VERSION_MINOR 2
 #define AMBIXFILE_VERSION_PATCH 0
 
 namespace ambixfile {
@@ -144,10 +149,24 @@ Matrix acnToSid(std::uint32_t order);
 // Defined up to third order; returns an empty matrix above that.
 Matrix fumaToAmbix(std::uint32_t order);
 Matrix ambixToFuma(std::uint32_t order);
+// Furse-Malham channel sets as used by .amb files, selected by channel count:
+//    1: W            3: WXY          4: WXYZ         5: WXYUV
+//    6: WXYZUV       7: WXYUVPQ      8: WXYZUVPQ     9: WXYZRSTUV
+//   11: WXYZRSTUVPQ 16: WXYZRSTUVKLMNOPQ
+// fumaChannelsToAmbix() returns the (N+1)^2 x channels adaptor matrix that
+// expands such a set to full ambiX; ambixToFumaChannels() is the reverse.
+// Both return an empty matrix for any other channel count.
+Matrix fumaChannelsToAmbix(std::uint32_t fumaChannels);
+Matrix ambixToFumaChannels(std::uint32_t fumaChannels);
 
 // ------------------------------------------------------------- file info ---
 
 enum class SampleFormat { Int16, Int24, Int32, Float32, Float64 };
+
+enum class Container { Caf, WavPack };
+
+// True if the library was built with WavPack support.
+bool wavpackAvailable() noexcept;
 
 enum class FileFormat {
     None,    // a CAF file that is not valid ambiX (still readable as audio)
@@ -168,6 +187,9 @@ struct Info {
     // Equal to ambiChannels for basic files.
     std::uint32_t fullAmbiChannels = 0;
     std::uint64_t frames = 0;
+    Container container = Container::Caf;
+    // True for WavPack files in hybrid (lossy) mode.
+    bool lossy = false;
 
     std::uint32_t fileChannels() const noexcept { return ambiChannels + extraChannels; }
 };
@@ -179,14 +201,33 @@ constexpr std::uint32_t fourCC(char a, char b, char c, char d) noexcept {
            static_cast<std::uint32_t>(static_cast<unsigned char>(d));
 }
 
-// A CAF chunk other than the audio description, the audio data and the ambiX
-// adaptor matrix. 'data' is the raw chunk payload (big-endian per CAF).
+// A CAF chunk other than the audio description, the audio data, the ambiX
+// adaptor matrix and the marker/region chunks, all of which have their own
+// accessors. 'data' is the raw chunk payload (big-endian per CAF).
 struct Chunk {
     std::uint32_t type = 0;
     std::vector<std::uint8_t> data;
 };
 
+// Positions are in sample frames. Names are UTF-8.
+struct Marker {
+    double position = 0.0;
+    std::string name;
+};
+
+struct Region {
+    double start = 0.0;
+    double end = 0.0;
+    std::string name;
+};
+
 // ---------------------------------------------------------------- reader ---
+
+struct ReaderConfig {
+    // Worker threads WavPack may use for decoding (0 = none). WavPack uses at
+    // most one per channel pair. Ignored for CAF files.
+    int wavpackThreads = 0;
+};
 
 class Reader {
 public:
@@ -195,10 +236,10 @@ public:
     Reader(Reader&&) noexcept;
     Reader& operator=(Reader&&) noexcept;
 
-    Status open(const char* utf8Path);
-    Status open(std::unique_ptr<Stream> stream);
+    Status open(const char* utf8Path, const ReaderConfig& config = ReaderConfig());
+    Status open(std::unique_ptr<Stream> stream, const ReaderConfig& config = ReaderConfig());
     // The stream must outlive the reader (or its close()).
-    Status open(Stream& stream);
+    Status open(Stream& stream, const ReaderConfig& config = ReaderConfig());
     void close();
     bool isOpen() const noexcept;
 
@@ -206,6 +247,8 @@ public:
     // Empty for files without an adaptor matrix.
     const Matrix& adaptorMatrix() const noexcept;
     const std::vector<Chunk>& chunks() const noexcept;
+    const std::vector<Marker>& markers() const noexcept;
+    const std::vector<Region>& regions() const noexcept;
 
     // Read the channels as stored: interleaved, info().fileChannels() wide.
     // Returns the number of frames read (less than asked at end of file).
@@ -231,9 +274,9 @@ private:
 struct WriterConfig {
     double sampleRate = 48000.0;
     SampleFormat sampleFormat = SampleFormat::Float32;
-    // Byte order of the audio samples. Big-endian is what ambiX tools expect;
-    // little-endian is valid CAF but some ambiX readers (including libambix's
-    // built-in CAF reader) cannot decode it.
+    // Byte order of the audio samples in CAF files. Big-endian is what ambiX
+    // tools expect; little-endian is valid CAF but some ambiX readers
+    // (including libambix's built-in CAF reader) cannot decode it.
     bool bigEndian = true;
     // Ambisonics channels to store in the file.
     std::uint32_t ambiChannels = 0;
@@ -244,8 +287,21 @@ struct WriterConfig {
     // ambiChannels columns and (N+1)^2 rows. As a convenience, an empty matrix
     // with extraChannels > 0 and a full set writes an identity matrix.
     Matrix adaptorMatrix;
-    // Additional chunks to write before the audio data.
+    // Metadata to store ahead of the audio. More can be added after open().
     std::vector<Chunk> chunks;
+    std::vector<Marker> markers;
+    std::vector<Region> regions;
+
+    // Container::WavPack needs a build with AMBIXFILE_ENABLE_WAVPACK. WavPack
+    // has no 64-bit float mode: Float64 is stored as Float32. It also cannot
+    // hold a file without audio: closing one with no frames written returns
+    // UnsupportedFormat.
+    Container container = Container::Caf;
+    // WavPack only: 0 for lossless, or 2.0 ... 23.9 bits per sample and
+    // channel for hybrid (lossy) mode.
+    float wavpackHybridBits = 0.0f;
+    // WavPack only: worker threads for encoding (0 = none).
+    int wavpackThreads = 0;
 };
 
 class Writer {
@@ -269,9 +325,14 @@ public:
     std::int64_t write(const float* interleaved, std::int64_t frames);
     std::int64_t write(const double* interleaved, std::int64_t frames);
 
-    // Queue a chunk to be written after the audio data when the file is
-    // closed (for metadata only known at the end, such as markers).
-    Status addTrailingChunk(Chunk chunk);
+    // Add metadata. Anything added before the first write() is stored ahead
+    // of the audio, where every ambiX reader finds it. Anything added later
+    // (for example markers set during a recording) is stored after the audio
+    // when the file is closed; this needs a seekable stream, and some readers
+    // (libambix among them) only look for metadata ahead of the audio.
+    Status addMarker(Marker marker);
+    Status addRegion(Region region);
+    Status addChunk(Chunk chunk);
 
     // Finish the file. Returns IoError if the stream could not be completed.
     Status close();

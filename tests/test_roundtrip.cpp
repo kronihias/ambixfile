@@ -110,10 +110,10 @@ void testExtended() {
     Chunk tail;
     tail.type = fourCC('t', 'e', 's', 't');
     tail.data = {1, 2, 3, 4, 5};
-    CHECK(writer.addTrailingChunk(tail) == Status::Ok);
+    CHECK(writer.addChunk(tail) == Status::Ok);
     Chunk bad;
     bad.type = fourCC('d', 'a', 't', 'a');
-    CHECK(writer.addTrailingChunk(bad) == Status::InvalidArgument);
+    CHECK(writer.addChunk(bad) == Status::InvalidArgument);
     CHECK(writer.close() == Status::Ok);
 
     Reader reader;
