@@ -190,6 +190,9 @@ struct Info {
     Container container = Container::Caf;
     // True for WavPack files in hybrid (lossy) mode.
     bool lossy = false;
+    // For lossy files: average stored bits per sample and channel (what was
+    // asked for with WriterConfig::wavpackHybridBits). 0 otherwise.
+    float lossyBitsPerSample = 0.0f;
 
     std::uint32_t fileChannels() const noexcept { return ambiChannels + extraChannels; }
 };

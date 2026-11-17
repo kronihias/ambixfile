@@ -52,6 +52,7 @@ void fillInfo(const Info& in, ambixfile_info* out) {
     out->container = static_cast<int>(in.container);
     out->big_endian = in.bigEndian ? 1 : 0;
     out->lossy = in.lossy ? 1 : 0;
+    out->lossy_bits_per_sample = in.lossyBitsPerSample;
 }
 
 bool toConfig(const ambixfile_writer_config* in, WriterConfig& out) {

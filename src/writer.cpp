@@ -123,6 +123,7 @@ Status Writer::Impl::configure(const WriterConfig& config) {
             return Status::InvalidArgument;
         if (info.sampleFormat == SampleFormat::Float64) info.sampleFormat = SampleFormat::Float32;
         info.lossy = config.wavpackHybridBits != 0.0f;
+        info.lossyBitsPerSample = config.wavpackHybridBits;
         hybridBits = config.wavpackHybridBits;
         threads = config.wavpackThreads;
     }

@@ -137,6 +137,7 @@ void testHybridAndFiles(const std::string& dir) {
     Reader reader;
     CHECK(reader.open(path.c_str()) == Status::Ok);
     CHECK(reader.info().lossy && reader.info().fileFormat == FileFormat::Basic);
+    CHECK(reader.info().lossyBitsPerSample > 1.0f && reader.info().lossyBitsPerSample < 24.0f);
     CHECK(reader.info().frames == frames && reader.info().ambiChannels == 4);
     std::vector<float> back(signal.size());
     CHECK(reader.read(back.data(), frames) == frames);

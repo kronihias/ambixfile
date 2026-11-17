@@ -127,6 +127,11 @@ WvDecoder* wvOpenDecoder(Stream& stream, int threads, ParsedCaf& out, int& bits,
     parsed.info.frames = frames > 0 ? static_cast<std::uint64_t>(frames) : 0;
     parsed.info.container = Container::WavPack;
     parsed.info.lossy = (mode & MODE_HYBRID) != 0 && (mode & MODE_LOSSLESS) == 0;
+    if (parsed.info.lossy && parsed.info.sampleRate > 0.0) {
+        // Bits per second of the whole stream, over samples per second.
+        parsed.info.lossyBitsPerSample = static_cast<float>(
+            WavpackGetAverageBitrate(wpc, 0) / (parsed.info.sampleRate * static_cast<double>(channels)));
+    }
     const Status layout = applyLayout(parsed.info, parsed.adaptor, parsed.channels);
     if (layout != Status::Ok) return fail(layout);
 

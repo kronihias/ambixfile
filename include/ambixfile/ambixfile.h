@@ -65,6 +65,7 @@ typedef struct ambixfile_info {
     int container;               /* ambixfile_container */
     int big_endian;
     int lossy;
+    float lossy_bits_per_sample; /* lossy files: average bits per sample and channel */
 } ambixfile_info;
 
 /* Custom byte stream. 'read', 'seek', 'tell' and 'size' are needed for
