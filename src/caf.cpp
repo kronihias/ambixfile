@@ -191,14 +191,17 @@ Status parseCaf(Stream& s, bool wrapper, ParsedCaf& out) {
                 offset = payload + 4;
                 continue;
             }
-            // A size of -1 means the audio runs to the end of the file.
+            // A size of -1 means the audio runs to the end of the file. Checked
+            // before any arithmetic: the size comes straight from the file.
+            if (size < -1 || (size >= 0 && size < 4)) return Status::InvalidFile;
+            if (size > std::numeric_limits<std::int64_t>::max() - payload) return Status::InvalidFile;
             if (size == -1 || (streamSize >= 0 && size > streamSize - payload)) {
                 if (streamSize < 0) return Status::UnsupportedFormat;
                 dataBytes = streamSize - payload - 4;
             } else {
                 dataBytes = size - 4;
             }
-            if (size < -1 || dataBytes < 0) return Status::InvalidFile;
+            if (dataBytes < 0) return Status::InvalidFile;
             if (size == -1) break;
             offset = payload + size;
             continue;

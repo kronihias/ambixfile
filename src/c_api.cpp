@@ -155,6 +155,12 @@ int64_t ambixfile_reader_read_float(ambixfile_reader* reader, float* interleaved
 int64_t ambixfile_reader_read_double(ambixfile_reader* reader, double* interleaved, int64_t frames) {
     return reader ? reader->reader.read(interleaved, frames) : 0;
 }
+int64_t ambixfile_reader_read_int16(ambixfile_reader* reader, int16_t* interleaved, int64_t frames) {
+    return reader ? reader->reader.read(interleaved, frames) : 0;
+}
+int64_t ambixfile_reader_read_int32(ambixfile_reader* reader, int32_t* interleaved, int64_t frames) {
+    return reader ? reader->reader.read(interleaved, frames) : 0;
+}
 int64_t ambixfile_reader_read_ambisonics_float(ambixfile_reader* reader, float* ambi, float* extra, int64_t frames) {
     return reader ? reader->reader.readAmbisonics(ambi, extra, frames) : 0;
 }
@@ -257,6 +263,14 @@ int64_t ambixfile_writer_write_float(ambixfile_writer* writer, const float* inte
     if (!writer) return 0;
     return guarded<int64_t>(0, [&] { return writer->writer.write(interleaved, frames); });
 }
+int64_t ambixfile_writer_write_int16(ambixfile_writer* writer, const int16_t* interleaved, int64_t frames) {
+    if (!writer) return 0;
+    return guarded<int64_t>(0, [&] { return writer->writer.write(interleaved, frames); });
+}
+int64_t ambixfile_writer_write_int32(ambixfile_writer* writer, const int32_t* interleaved, int64_t frames) {
+    if (!writer) return 0;
+    return guarded<int64_t>(0, [&] { return writer->writer.write(interleaved, frames); });
+}
 int64_t ambixfile_writer_write_double(ambixfile_writer* writer, const double* interleaved, int64_t frames) {
     if (!writer) return 0;
     return guarded<int64_t>(0, [&] { return writer->writer.write(interleaved, frames); });
@@ -320,6 +334,17 @@ size_t ambixfile_fuma_channels_matrix(uint32_t fuma_channels, int to_fuma, float
         const Matrix m = to_fuma ? ambixToFumaChannels(fuma_channels) : fumaChannelsToAmbix(fuma_channels);
         return copyMatrix(m, values, capacity, rows, cols);
     });
+}
+
+size_t ambixfile_mixed_order_matrix(uint32_t horizontal_order, uint32_t vertical_order, float* values,
+                                    size_t capacity, uint32_t* rows, uint32_t* cols) {
+    return guarded<size_t>(0, [&] {
+        return copyMatrix(mixedOrderToAmbix(horizontal_order, vertical_order), values, capacity, rows, cols);
+    });
+}
+
+size_t ambixfile_hemisphere_matrix(uint32_t order, float* values, size_t capacity, uint32_t* rows, uint32_t* cols) {
+    return guarded<size_t>(0, [&] { return copyMatrix(hemisphereToAmbix(order), values, capacity, rows, cols); });
 }
 
 int ambixfile_matrix_pseudo_inverse(const float* values, uint32_t rows, uint32_t cols, float* out) {

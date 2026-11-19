@@ -41,6 +41,26 @@ struct Writer::Impl {
 
     Status configure(const WriterConfig& config);
     void start();
+
+    std::vector<double> scratch; // for integer input
+
+    template <typename I>
+    std::int64_t writeInts(const I* src, std::int64_t frames, double scale) {
+        if (!stream || !src) return 0;
+        const std::uint32_t channels = info.fileChannels();
+        std::int64_t total = 0;
+        while (frames > 0) {
+            const std::int64_t n = frames < blockFrames ? frames : static_cast<std::int64_t>(blockFrames);
+            const std::size_t count = static_cast<std::size_t>(n) * channels;
+            for (std::size_t i = 0; i < count; ++i) scratch[i] = static_cast<double>(src[i]) / scale;
+            const std::int64_t done = write(scratch.data(), n);
+            total += done;
+            if (done < n) break;
+            src += count;
+            frames -= n;
+        }
+        return total;
+    }
     Status finish();
 
     template <typename T>
@@ -133,6 +153,7 @@ Status Writer::Impl::configure(const WriterConfig& config) {
     regions = config.regions;
     bytesPerFrame = channels * bytesPerSample(info.sampleFormat);
     blockFrames = blockFramesFor(channels);
+    scratch.resize(static_cast<std::size_t>(blockFrames) * channels);
     return Status::Ok;
 }
 
@@ -255,6 +276,13 @@ std::int64_t Writer::write(const float* interleaved, std::int64_t frames) {
 }
 std::int64_t Writer::write(const double* interleaved, std::int64_t frames) {
     return impl_ ? impl_->write(interleaved, frames) : 0;
+}
+
+std::int64_t Writer::write(const std::int16_t* interleaved, std::int64_t frames) {
+    return impl_ ? impl_->writeInts(interleaved, frames, 32768.0) : 0;
+}
+std::int64_t Writer::write(const std::int32_t* interleaved, std::int64_t frames) {
+    return impl_ ? impl_->writeInts(interleaved, frames, 2147483648.0) : 0;
 }
 
 Status Writer::addMarker(Marker marker) {
