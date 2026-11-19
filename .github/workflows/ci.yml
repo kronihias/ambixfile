@@ -1,0 +1,113 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# WavPack and libambix are fetched at pinned commits. libambix (LGPL) is used
+# only by the interoperability test, as a reference to compare files with; it
+# is never part of the library.
+env:
+  WAVPACK_REF: bb4071629cdb791c8eeb61903e0c65a29e3dc52a
+  LIBAMBIX_REF: 581b435c178dad34dc1bfa6b68a578b3973e1d32
+
+jobs:
+  build:
+    name: ${{ matrix.name }}${{ matrix.wavpack == 'ON' && ' + WavPack' || '' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        name: [Linux GCC, Linux Clang, macOS, Windows]
+        wavpack: ['OFF', 'ON']
+        include:
+          - { name: Linux GCC,   os: ubuntu-latest,  cc: gcc,   cxx: g++ }
+          - { name: Linux Clang, os: ubuntu-latest,  cc: clang, cxx: clang++ }
+          - { name: macOS,       os: macos-latest }
+          - { name: Windows,     os: windows-latest }
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Fetch WavPack
+        if: matrix.wavpack == 'ON'
+        uses: actions/checkout@v5
+        with:
+          repository: dbry/WavPack
+          ref: ${{ env.WAVPACK_REF }}
+          path: deps/WavPack
+
+      - name: Configure
+        shell: bash
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          -DAMBIXFILE_BUILD_TESTS=ON
+          -DAMBIXFILE_ENABLE_WAVPACK=${{ matrix.wavpack }}
+          ${{ matrix.wavpack == 'ON' && '-DAMBIXFILE_WAVPACK_DIR=deps/WavPack' || '' }}
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+  sanitizers:
+    name: Linux Clang, ASan + UBSan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          repository: dbry/WavPack
+          ref: ${{ env.WAVPACK_REF }}
+          path: deps/WavPack
+
+      - name: Configure
+        env:
+          CC: clang
+          CXX: clang++
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+          -DAMBIXFILE_BUILD_TESTS=ON
+          -DAMBIXFILE_ENABLE_WAVPACK=ON -DAMBIXFILE_WAVPACK_DIR=deps/WavPack
+          "-DCMAKE_CXX_FLAGS=-fsanitize=address,undefined -fno-sanitize-recover=undefined"
+          "-DCMAKE_C_FLAGS=-fsanitize=address,undefined"
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  interop:
+    name: Interoperability with libambix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          repository: dbry/WavPack
+          ref: ${{ env.WAVPACK_REF }}
+          path: deps/WavPack
+      - uses: actions/checkout@v5
+        with:
+          repository: kronihias/libambix
+          ref: ${{ env.LIBAMBIX_REF }}
+          path: deps/libambix
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          -DAMBIXFILE_BUILD_TESTS=ON
+          -DAMBIXFILE_ENABLE_WAVPACK=ON -DAMBIXFILE_WAVPACK_DIR=deps/WavPack
+          -DAMBIXFILE_LIBAMBIX_DIR=deps/libambix
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
