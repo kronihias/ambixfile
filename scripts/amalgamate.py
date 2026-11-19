@@ -15,7 +15,8 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 PUBLIC = "include/ambixfile/ambixfile.hpp"
-SOURCES = ["src/internal.hpp", "src/stream.cpp", "src/matrix.cpp", "src/caf.cpp", "src/wavpack.cpp",
+SOURCES = ["src/internal.hpp", "src/stream.cpp", "src/hemisphere_tables.hpp",
+           "src/matrix.cpp", "src/caf.cpp", "src/wavpack.cpp",
            "src/reader.cpp", "src/writer.cpp"]
 LOCAL_INCLUDE = re.compile(r'^\s*#\s*include\s+"')
 

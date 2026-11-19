@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Matthias Kronlachner
 
 #include "internal.hpp"
+#include "hemisphere_tables.hpp"
 
 namespace ambixfile {
 
@@ -281,6 +282,60 @@ Matrix ambixToFumaChannels(std::uint32_t fumaChannels) {
         for (std::uint32_t row = 0; row < count; ++row)
             if (set[row] == detail::kAcnToFumaIndex[acn]) m(row, acn) = static_cast<float>(detail::fumaGain(set[row]));
     return m;
+}
+
+Matrix mixedOrderToAmbix(std::uint32_t horizontalOrder, std::uint32_t verticalOrder) {
+    if (verticalOrder > horizontalOrder || horizontalOrder > 1000) return Matrix();
+    const std::uint32_t rows = orderToChannels(horizontalOrder);
+    const std::uint32_t cols = orderToChannels(verticalOrder) + 2 * (horizontalOrder - verticalOrder);
+    Matrix m(rows, cols);
+    std::uint32_t col = 0;
+    for (std::uint32_t n = 0; n <= horizontalOrder; ++n) {
+        const std::uint32_t first = n * n; // ACN of (n, -n); (n, +n) is first + 2n
+        if (n <= verticalOrder) {
+            for (std::uint32_t i = 0; i <= 2 * n; ++i) m(first + i, col++) = 1.0f;
+        } else {
+            m(first, col++) = 1.0f;
+            m(first + 2 * n, col++) = 1.0f;
+        }
+    }
+    return m;
+}
+
+Matrix horizontalToAmbix(std::uint32_t order) { return mixedOrderToAmbix(order, 0); }
+
+bool mixedOrderOf(const Matrix& adaptor, std::uint32_t& horizontalOrder, std::uint32_t& verticalOrder) noexcept {
+    std::uint32_t h = 0;
+    if (adaptor.empty() || !channelsToOrder(adaptor.rows(), h)) return false;
+    // cols = (V+1)^2 + 2(H-V) grows with V, so at most one V fits.
+    for (std::uint32_t v = 0; v <= h; ++v) {
+        const std::uint32_t cols = orderToChannels(v) + 2 * (h - v);
+        if (cols < adaptor.cols()) continue;
+        if (cols > adaptor.cols()) return false;
+        std::uint32_t col = 0;
+        for (std::uint32_t row = 0; row < adaptor.rows(); ++row) {
+            std::uint32_t n = 0;
+            while ((n + 1) * (n + 1) <= row) ++n;
+            const bool kept = n <= v || row == n * n || row == n * n + 2 * n;
+            for (std::uint32_t c = 0; c < adaptor.cols(); ++c) {
+                const float expected = (kept && c == col) ? 1.0f : 0.0f;
+                if (adaptor(row, c) != expected) return false;
+            }
+            if (kept) ++col;
+        }
+        horizontalOrder = h;
+        verticalOrder = v;
+        return true;
+    }
+    return false;
+}
+
+Matrix hemisphereToAmbix(std::uint32_t order) {
+    if (order < 1 || order > detail::kHemisphereMaxOrder) return Matrix();
+    const std::uint32_t rows = orderToChannels(order);
+    const std::uint32_t cols = (order + 1) * (order + 2) / 2;
+    const float* table = detail::kHemisphere[order - 1];
+    return Matrix(rows, cols, std::vector<float>(table, table + static_cast<std::size_t>(rows) * cols));
 }
 
 } // namespace ambixfile

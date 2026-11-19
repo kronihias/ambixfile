@@ -7,7 +7,8 @@ ACN channel order with SN3D normalisation.
 - MIT licensed, usable in open and closed source projects
 - no dependencies beyond the C++ standard library (no libsndfile)
 - basic and extended ambiX files, including adaptor matrices and extra channels
-- 16/24/32-bit integer and 32/64-bit float samples, either byte order
+- 16/24/32-bit integer and 32/64-bit float samples, either byte order; read and
+  written from `float`, `double`, `int16_t` or `int32_t` buffers
 - markers and regions with names
 - optional WavPack container (lossless or hybrid lossy), auto-detected on read
 - a C API for C programs and language bindings
@@ -88,6 +89,34 @@ every ambiX reader finds it. Metadata added later, for example markers set
 during a recording, is stored after the audio when the file is closed; some
 readers (libambix among them) do not look there.
 
+## Reduced channel sets
+
+An extended file can store fewer channels than the full set, with an adaptor
+matrix that expands them. The library has the matrices from the ambiX paper's
+examples:
+
+```cpp
+Matrix horizontal = horizontalToAmbix(3);       // 7 channels, 2D material
+Matrix mixed      = mixedOrderToAmbix(3, 1);    // 3H1V: 8 channels
+Matrix hemisphere = hemisphereToAmbix(3);       // 10 channels, orders 1 to 7
+
+WriterConfig config;
+config.adaptorMatrix = hemisphere;
+config.ambiChannels  = hemisphere.cols();
+// To reduce a full set for storing: stored = hemisphere.transposed() * full
+// (all three have orthonormal columns).
+```
+
+`mixedOrderOf()` recognises a horizontal-only or mixed-order matrix in a file.
+`scripts/generate_adaptor_matrices.py` (needs numpy) prints the same matrices
+as text or CSV, computes hemisphere matrices for other orders and cap sizes
+(`--el-min`), and regenerates the table the library ships.
+
+## Command-line tool
+
+`ambixfile-info [-m] file...` prints a file's container, format, channels,
+adaptor matrix (`-m` for its values), markers, regions and other chunks.
+
 ## WavPack
 
 Build with `-DAMBIXFILE_ENABLE_WAVPACK=ON` (CMake) or define
@@ -133,6 +162,28 @@ audio, adaptor matrices, markers, regions, the convention matrices and (when
 enabled) WavPack files. Point `-DAMBIXFILE_LIBAMBIX_DIR=<libambix source tree>`
 at a checkout with a CMake build to enable it. libambix is used only by that
 test and is not part of this library.
+
+### Fuzzing
+
+The reader is fuzzed with libFuzzer (Clang):
+
+```sh
+cmake -S . -B build-fuzz -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang \
+      -DAMBIXFILE_BUILD_FUZZERS=ON -DAMBIXFILE_BUILD_TESTS=OFF \
+      "-DCMAKE_CXX_FLAGS=-fsanitize=fuzzer-no-link,address,undefined"
+cmake --build build-fuzz
+mkdir corpus && build-fuzz/make_seeds corpus
+build-fuzz/fuzz_reader corpus -max_len=4096
+```
+
+CI runs it for a minute on every change. Inputs that once crashed it live in
+`tests/fuzz_regressions` and run as a normal test.
+
+### Installing
+
+`cmake --install build` installs the library, the headers and
+`ambixfile-info`. For builds without WavPack it also installs a CMake package
+(`find_package(ambixfile)`, target `ambixfile::ambixfile`).
 
 ## Format reference
 

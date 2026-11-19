@@ -82,6 +82,26 @@ struct Reader::Impl {
         return total;
     }
 
+    // Integers go through the double scratch block: exact for every integer
+    // format, as a double holds 32-bit samples without loss.
+    template <typename I>
+    std::int64_t readInts(I* dst, std::int64_t frames, double scale) {
+        if (!stream || !dst) return 0;
+        const std::uint32_t channels = file.info.fileChannels();
+        std::int64_t total = 0;
+        while (frames > 0) {
+            const std::int64_t want = frames < blockFrames ? frames : static_cast<std::int64_t>(blockFrames);
+            const std::int64_t got = readRaw(scratchD.data(), want);
+            const std::size_t count = static_cast<std::size_t>(got) * channels;
+            for (std::size_t i = 0; i < count; ++i) dst[i] = static_cast<I>(detail::toFixed(scratchD[i], scale));
+            dst += count;
+            total += got;
+            frames -= got;
+            if (got < want) break;
+        }
+        return total;
+    }
+
     template <typename T>
     std::int64_t readAmbi(T* ambi, T* extra, std::int64_t frames, std::vector<T>& scratch) {
         const Info& info = file.info;
@@ -215,6 +235,12 @@ std::int64_t Reader::read(float* interleaved, std::int64_t frames) {
 }
 std::int64_t Reader::read(double* interleaved, std::int64_t frames) {
     return impl_ ? impl_->readRaw(interleaved, frames) : 0;
+}
+std::int64_t Reader::read(std::int16_t* interleaved, std::int64_t frames) {
+    return impl_ ? impl_->readInts(interleaved, frames, 32768.0) : 0;
+}
+std::int64_t Reader::read(std::int32_t* interleaved, std::int64_t frames) {
+    return impl_ ? impl_->readInts(interleaved, frames, 2147483648.0) : 0;
 }
 std::int64_t Reader::readAmbisonics(float* ambi, float* extra, std::int64_t frames) {
     return isOpen() ? impl_->readAmbi(ambi, extra, frames, impl_->scratchF) : 0;

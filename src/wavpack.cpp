@@ -147,11 +147,18 @@ void wvCloseDecoder(WvDecoder* decoder) noexcept {
 }
 
 std::uint32_t wvUnpack(WvDecoder* decoder, std::int32_t* buffer, std::uint32_t frames) {
+    if (!decoder->context) return 0; // a seek failed earlier
     return WavpackUnpackSamples(decoder->context, buffer, frames);
 }
 
 bool wvSeek(WvDecoder* decoder, std::uint64_t frame) {
-    return WavpackSeekSample64(decoder->context, static_cast<std::int64_t>(frame)) != 0;
+    if (!decoder->context) return false;
+    if (WavpackSeekSample64(decoder->context, static_cast<std::int64_t>(frame))) return true;
+    // WavPack leaves the context unusable after a failed seek (damaged file):
+    // unpacking from it again reads freed memory. Nothing more can be decoded.
+    WavpackCloseFile(decoder->context);
+    decoder->context = nullptr;
+    return false;
 }
 
 // ---- encoding ----

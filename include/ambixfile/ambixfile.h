@@ -108,6 +108,9 @@ int ambixfile_reader_get_adaptor_matrix(const ambixfile_reader* reader, uint32_t
  * Return the number of frames read. */
 int64_t ambixfile_reader_read_float(ambixfile_reader* reader, float* interleaved, int64_t frames);
 int64_t ambixfile_reader_read_double(ambixfile_reader* reader, double* interleaved, int64_t frames);
+/* As integers, full scale = the type's range (rounded and clipped). */
+int64_t ambixfile_reader_read_int16(ambixfile_reader* reader, int16_t* interleaved, int64_t frames);
+int64_t ambixfile_reader_read_int32(ambixfile_reader* reader, int32_t* interleaved, int64_t frames);
 /* With the adaptor matrix applied: 'ambi' gets full_ambi_channels, 'extra'
  * gets extra_channels interleaved channels. Either may be NULL. */
 int64_t ambixfile_reader_read_ambisonics_float(ambixfile_reader* reader, float* ambi, float* extra, int64_t frames);
@@ -161,6 +164,8 @@ void ambixfile_writer_get_info(const ambixfile_writer* writer, ambixfile_info* i
  * of frames written. */
 int64_t ambixfile_writer_write_float(ambixfile_writer* writer, const float* interleaved, int64_t frames);
 int64_t ambixfile_writer_write_double(ambixfile_writer* writer, const double* interleaved, int64_t frames);
+int64_t ambixfile_writer_write_int16(ambixfile_writer* writer, const int16_t* interleaved, int64_t frames);
+int64_t ambixfile_writer_write_int32(ambixfile_writer* writer, const int32_t* interleaved, int64_t frames);
 /* Metadata added before the first write is stored ahead of the audio (the
  * most compatible place), anything later after the audio. */
 ambixfile_status ambixfile_writer_add_marker(ambixfile_writer* writer, double position, const char* name);
@@ -190,6 +195,17 @@ size_t ambixfile_convention_matrix(ambixfile_convention convention, uint32_t ord
  * (may be NULL) receive the shape. */
 size_t ambixfile_fuma_channels_matrix(uint32_t fuma_channels, int to_fuma, float* values, size_t capacity,
                                       uint32_t* rows, uint32_t* cols);
+
+/* Adaptor matrix for a mixed-order set (#H#V): everything up to the vertical
+ * order plus the sectoral harmonics up to the horizontal order. A vertical
+ * order of 0 is horizontal-only material (2N+1 channels). Same return
+ * convention as above. */
+size_t ambixfile_mixed_order_matrix(uint32_t horizontal_order, uint32_t vertical_order, float* values,
+                                    size_t capacity, uint32_t* rows, uint32_t* cols);
+
+/* Adaptor matrix for an upper-hemisphere set, (N+1)(N+2)/2 channels, orders 1
+ * to 7. Same return convention as above. */
+size_t ambixfile_hemisphere_matrix(uint32_t order, float* values, size_t capacity, uint32_t* rows, uint32_t* cols);
 
 /* Pseudo-inverse of a full-rank rows x cols matrix; 'out' receives cols x
  * rows floats. Returns non-zero on success. */

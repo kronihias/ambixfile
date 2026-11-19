@@ -83,6 +83,58 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
+  fuzz:
+    name: Fuzz the reader (60 s)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          repository: dbry/WavPack
+          ref: ${{ env.WAVPACK_REF }}
+          path: deps/WavPack
+
+      # WavPack itself is built with ASan only: its decoder does wrapping
+      # integer arithmetic on damaged data, which UBSan would report.
+      - name: Configure
+        env:
+          CC: clang
+          CXX: clang++
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DAMBIXFILE_BUILD_TESTS=OFF -DAMBIXFILE_BUILD_TOOLS=OFF -DAMBIXFILE_BUILD_FUZZERS=ON
+          -DAMBIXFILE_ENABLE_WAVPACK=ON -DAMBIXFILE_WAVPACK_DIR=deps/WavPack
+          "-DCMAKE_CXX_FLAGS=-fsanitize=fuzzer-no-link,address,undefined -fno-sanitize-recover=undefined"
+          "-DCMAKE_C_FLAGS=-fsanitize=fuzzer-no-link,address"
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Fuzz
+        run: |
+          mkdir corpus
+          ./build/make_seeds corpus
+          cp tests/fuzz_regressions/* corpus/
+          ./build/fuzz_reader corpus -max_total_time=60 -max_len=4096 -timeout=10
+
+      - name: Keep the crashing input
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash
+          path: |
+            crash-*
+            timeout-*
+            oom-*
+
+  matrices:
+    name: Adaptor matrix generator
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: python3 -m pip install numpy
+      - run: python3 scripts/generate_adaptor_matrices.py --check
+
   interop:
     name: Interoperability with libambix
     runs-on: ubuntu-latest

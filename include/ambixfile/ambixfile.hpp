@@ -27,7 +27,7 @@
 #include <vector>
 
 #define AMBIXFILE_VERSION_MAJOR 0
-#define AMBIXFILE_VERSION_MINOR 2
+#define AMBIXFILE_VERSION_MINOR 3
 #define AMBIXFILE_VERSION_PATCH 0
 
 namespace ambixfile {
@@ -159,6 +159,26 @@ Matrix ambixToFuma(std::uint32_t order);
 Matrix fumaChannelsToAmbix(std::uint32_t fumaChannels);
 Matrix ambixToFumaChannels(std::uint32_t fumaChannels);
 
+// Adaptor matrices for reduced channel sets ("...ToAmbix": store as a file's
+// adaptor matrix). All have orthonormal columns, so the matrix that reduces a
+// full set for storing is simply transposed(). Column k belongs to the k-th
+// kept harmonic in ACN order. scripts/generate_adaptor_matrices.py produces
+// the same matrices, and the hemisphere ones for other cap sizes.
+//
+// Mixed order #H#V: everything up to the vertical order, plus the sectoral
+// harmonics (|m| = n) up to the horizontal order: (V+1)^2 + 2(H-V) channels.
+// Empty if verticalOrder > horizontalOrder.
+Matrix mixedOrderToAmbix(std::uint32_t horizontalOrder, std::uint32_t verticalOrder);
+// Horizontal-only material, 2N+1 channels: mixedOrderToAmbix(order, 0).
+Matrix horizontalToAmbix(std::uint32_t order);
+// Recognise a matrix made by mixedOrderToAmbix() (so also horizontal-only,
+// and the identity as H = V). Returns false for anything else.
+bool mixedOrderOf(const Matrix& adaptor, std::uint32_t& horizontalOrder, std::uint32_t& verticalOrder) noexcept;
+// Upper hemisphere, (N+1)(N+2)/2 channels: a basis for sound fields whose
+// energy lies above a plane a little below the horizon (ambiX paper, sec.
+// 4.5). Available for orders 1 to 7; empty otherwise.
+Matrix hemisphereToAmbix(std::uint32_t order);
+
 // ------------------------------------------------------------- file info ---
 
 enum class SampleFormat { Int16, Int24, Int32, Float32, Float64 };
@@ -257,6 +277,11 @@ public:
     // Returns the number of frames read (less than asked at end of file).
     std::int64_t read(float* interleaved, std::int64_t frames);
     std::int64_t read(double* interleaved, std::int64_t frames);
+    // As integers, full scale = the type's range. Samples of integer files
+    // arrive bit-exact when the type is at least as wide as the file's
+    // samples; otherwise, and for float files, they are rounded and clipped.
+    std::int64_t read(std::int16_t* interleaved, std::int64_t frames);
+    std::int64_t read(std::int32_t* interleaved, std::int64_t frames);
 
     // Read with the adaptor matrix applied. 'ambi' receives
     // info().fullAmbiChannels interleaved channels, 'extra' receives
@@ -264,6 +289,8 @@ public:
     std::int64_t readAmbisonics(float* ambi, float* extra, std::int64_t frames);
     std::int64_t readAmbisonics(double* ambi, double* extra, std::int64_t frames);
 
+    // Returns false if the position could not be reached. For a damaged
+    // WavPack file that ends decoding: later reads return no frames.
     bool seek(std::uint64_t frame);
     std::uint64_t tell() const noexcept;
 
@@ -327,6 +354,10 @@ public:
     // clip at full scale. Returns the number of frames written.
     std::int64_t write(const float* interleaved, std::int64_t frames);
     std::int64_t write(const double* interleaved, std::int64_t frames);
+    // From integers, full scale = the type's range. Bit-exact when the file's
+    // integer format is at least as wide as the type.
+    std::int64_t write(const std::int16_t* interleaved, std::int64_t frames);
+    std::int64_t write(const std::int32_t* interleaved, std::int64_t frames);
 
     // Add metadata. Anything added before the first write() is stored ahead
     // of the audio, where every ambiX reader finds it. Anything added later

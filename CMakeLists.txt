@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(ambixfile VERSION 0.2.0 LANGUAGES CXX)
+project(ambixfile VERSION 0.3.0 LANGUAGES CXX)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   set(_ambixfile_top_level ON)
@@ -8,6 +8,9 @@ else()
 endif()
 
 option(AMBIXFILE_BUILD_TESTS "Build the ambixfile tests" ${_ambixfile_top_level})
+option(AMBIXFILE_BUILD_TOOLS "Build the ambixfile-info command-line tool" ${_ambixfile_top_level})
+option(AMBIXFILE_BUILD_FUZZERS "Build the libFuzzer targets (needs Clang)" OFF)
+option(AMBIXFILE_INSTALL "Add install rules" ${_ambixfile_top_level})
 option(AMBIXFILE_ENABLE_WAVPACK "Support WavPack-compressed ambiX files (needs the WavPack library)" OFF)
 # Optional: a WavPack source tree to build and link statically. Without it an
 # existing 'wavpack' target, a WavPack CMake package or pkg-config is used.
@@ -78,16 +81,66 @@ if(_ambixfile_top_level)
   target_compile_options(ambixfile PRIVATE ${_ambixfile_warnings})
 endif()
 
+if(AMBIXFILE_BUILD_TOOLS)
+  add_executable(ambixfile-info tools/ambixfile-info.cpp)
+  target_link_libraries(ambixfile-info PRIVATE ambixfile)
+  target_compile_options(ambixfile-info PRIVATE ${_ambixfile_warnings})
+endif()
+
+if(AMBIXFILE_BUILD_FUZZERS)
+  # The library is built with the sanitizers too, so set them for everything:
+  #   -DCMAKE_CXX_FLAGS="-fsanitize=fuzzer-no-link,address,undefined"
+  add_executable(fuzz_reader fuzz/fuzz_reader.cpp)
+  target_link_libraries(fuzz_reader PRIVATE ambixfile)
+  target_link_options(fuzz_reader PRIVATE -fsanitize=fuzzer)
+  add_executable(make_seeds fuzz/make_seeds.cpp) # starting corpus: make_seeds <dir>
+  target_link_libraries(make_seeds PRIVATE ambixfile)
+endif()
+
+if(AMBIXFILE_INSTALL)
+  include(GNUInstallDirs)
+  include(CMakePackageConfigHelpers)
+  install(TARGETS ambixfile EXPORT ambixfileTargets
+          ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+          LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+          RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+  install(DIRECTORY include/ambixfile DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+  if(AMBIXFILE_BUILD_TOOLS)
+    install(TARGETS ambixfile-info RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+  endif()
+  # A static ambixfile with WavPack needs its consumers to find WavPack as
+  # well; that part is not exported, so the package files are only installed
+  # for builds a consumer can link on their own.
+  get_target_property(_ambixfile_type ambixfile TYPE)
+  if(NOT AMBIXFILE_ENABLE_WAVPACK OR NOT _ambixfile_type STREQUAL "STATIC_LIBRARY")
+    install(EXPORT ambixfileTargets NAMESPACE ambixfile:: DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/ambixfile)
+    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/ambixfileConfig.cmake
+         "include(\"\${CMAKE_CURRENT_LIST_DIR}/ambixfileTargets.cmake\")\n")
+    write_basic_package_version_file(${CMAKE_CURRENT_BINARY_DIR}/ambixfileConfigVersion.cmake
+                                     VERSION ${PROJECT_VERSION} COMPATIBILITY SameMinorVersion)
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/ambixfileConfig.cmake
+                  ${CMAKE_CURRENT_BINARY_DIR}/ambixfileConfigVersion.cmake
+            DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/ambixfile)
+  endif()
+endif()
+
 if(AMBIXFILE_BUILD_TESTS)
   enable_testing()
   enable_language(C)
 
-  foreach(name test_matrix test_roundtrip test_metadata test_wavpack)
+  foreach(name test_matrix test_roundtrip test_metadata test_wavpack test_reduced_sets)
     add_executable(${name} tests/${name}.cpp)
     target_link_libraries(${name} PRIVATE ambixfile)
     target_compile_options(${name} PRIVATE ${_ambixfile_warnings})
     add_test(NAME ${name} COMMAND ${name} ${CMAKE_CURRENT_BINARY_DIR})
   endforeach()
+
+  # Inputs the fuzzer once crashed on, run through the fuzz target.
+  add_executable(test_fuzz_regressions tests/test_fuzz_regressions.cpp fuzz/fuzz_reader.cpp)
+  target_link_libraries(test_fuzz_regressions PRIVATE ambixfile)
+  add_test(NAME test_fuzz_regressions
+           COMMAND test_fuzz_regressions ${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz_regressions
+                   wavpack_failed_seek.bin caf_data_size_overflow.bin)
 
   # The C API, used from a plain C program.
   add_executable(test_c_api tests/test_c_api.c)
@@ -103,7 +156,7 @@ if(AMBIXFILE_BUILD_TESTS)
     add_custom_command(
       OUTPUT ${_single}
       COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/scripts/amalgamate.py ${_single}
-      DEPENDS scripts/amalgamate.py include/ambixfile/ambixfile.hpp src/internal.hpp
+      DEPENDS scripts/amalgamate.py include/ambixfile/ambixfile.hpp src/internal.hpp src/hemisphere_tables.hpp
               src/stream.cpp src/matrix.cpp src/caf.cpp src/wavpack.cpp src/reader.cpp src/writer.cpp
       COMMENT "Generating single-header ambixfile.hpp")
     add_executable(test_single_header
