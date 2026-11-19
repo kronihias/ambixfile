@@ -134,6 +134,18 @@ enabled) WavPack files. Point `-DAMBIXFILE_LIBAMBIX_DIR=<libambix source tree>`
 at a checkout with a CMake build to enable it. libambix is used only by that
 test and is not part of this library.
 
+## Format reference
+
+The ambiX format is defined in
+
+> C. Nachbar, F. Zotter, E. Deleflie, A. Sontacchi: *ambiX - A Suggested
+> Ambisonics Format*. Ambisonics Symposium 2011, Lexington, KY.
+> <https://ambisonics.iem.at/proceedings-of-the-ambisonics-symposium-2011/ambix-a-suggested-ambisonics-format>
+
+The container is Apple's Core Audio Format. Two things here go beyond the
+paper: 64-bit float samples (the paper names 16/24/32-bit integer and 32-bit
+float) and the markers and regions, which are plain CAF chunks.
+
 ## Licence
 
 MIT, see [LICENSE](LICENSE). Written from the published ambiX and CAF format
